@@ -264,8 +264,59 @@ async def set_cost(ctx, new_cost: float, effective_date: str = None):
         current_cost = cursor.fetchone()[0]
 
         cursor.execute(
-            "UPDATE plan_cost SET monthly_cost = ?, effective_date = ? WHERE id = 1", (new_cost, effective_date))
+            """
+            UPDATE plan_cost SET monthly_cost = ?, effective_date = ? WHERE id = 1
+            """, (new_cost, effective_date))
+
+        cursor.execute(
+            "SELECT user_id, username, end_date, duration FROM users")
+        users = cursor.fetchall()
+
+        for user_id, username, end_date, duration in users:
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            if end_date_dt < effective_date_dt:
+                # No adjustment needed for users whose subscriptions end before the effective date
+                continue
+
+        adjustments = []
+        effective_date_dt = datetime.strptime(effective_date, "%Y-%m-%d")
+
+        # Calculate remaining months from the effective date
+        remaining_months = (end_date_dt.year - effective_date_dt.year) * \
+            12 + (end_date_dt.month - effective_date_dt.month)
+
+        # Calculate price difference
+        old_total = current_cost * remaining_months
+        new_total = new_cost * remaining_months
+        adjustment = new_total - old_total
+
+        # Update the user's cost in the database
+        cursor.execute("""
+                UPDATE users
+                SET cost = ?
+                WHERE user_id = ?
+            """, (new_total, user_id))
+
+        # Append adjustment details
+        adjustments.append((user_id, username, adjustment))
+
         conn.commit()
+
+        if adjustments:
+            response = "**Price Adjustment Summary:**\n"
+            for user_id, username, adjustment in adjustments:
+                if adjustment > 0:
+                    response += f"- {username} (<@{user_id}>) owes **${
+                        adjustment:.2f}**.\n"
+                elif adjustment < 0:
+                    response += f"- {
+                        username} (<@{user_id}>) is owed a refund of **${-adjustment:.2f}**.\n"
+                else:
+                    response += f"- {username} (<@{user_id}>) has no adjustment.\n"
+            await ctx.send(response)
+        else:
+            await ctx.send("No adjustments are needed for current users.")
+
         conn.close()
         await ctx.send(f"The monthly cost of the family plan has been updated to ${new_cost:.2f}.")
     except Exception as e:
