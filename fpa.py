@@ -1,7 +1,7 @@
 import discord
 import os
 import sqlite3
-import datetime
+from datetime import datetime, timedelta
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
@@ -16,7 +16,7 @@ async def renewal_reminder():
         cursor = conn.cursor()
 
         today = datetime.now().date()
-        threshold_date = today + datetime.timedelta(days=14)
+        threshold_date = today + timedelta(days=14)
 
         cursor.execute("""
             SELECT user_id, username, end_date FROM users
@@ -34,9 +34,15 @@ async def renewal_reminder():
                 grouped_users[end_date] = []
             grouped_users[end_date].append((user_id, username))
 
-        channel = discord.utils.get(bot.get_all_channels(), name="general")
+        # channel = discord.utils.get(bot.get_all_channels(), name="general")
+        # if not channel:
+        #     print("General channel not found.")
+        #     conn.close()
+        #     return
+
+        channel = discord.utils.get(bot.get_all_channels(), name="fpa-bot")
         if not channel:
-            print("General channel not found.")
+            print("fpa-bot channel not found.")
             conn.close()
             return
 
@@ -66,14 +72,17 @@ async def renewal_reminder():
 @bot.event
 async def on_ready():
     print(f"Bot connected as {bot.user}")
+    command_names = [command.name for command in bot.commands]
+    print(f"Loaded commands: {command_names}")
 
 
-@bot.command
-async def add_user(ctx, name: str, start_date: str, duration: int, mention: discord.Member = None):
+@bot.command()
+async def add(ctx, name: str, start_date: str, duration: int, mention: discord.Member = None):
     """
     Adds a user to the subscription list, resolving ambiguity with an optional mention.
     """
     try:
+        print(f"{ctx.author.name} requested the add command.")
         matches = [m for m in ctx.guild.members if m.display_name == name]
 
         if len(matches) == 0:
@@ -97,7 +106,7 @@ async def add_user(ctx, name: str, start_date: str, duration: int, mention: disc
                 return
 
         start = datetime.strptime(start_date, "%Y-%m-%d")
-        end = start + datetime.timedelta(days=30 * duration)
+        end = start + timedelta(days=30 * duration)
 
         conn = sqlite3.connect("data.db")
         cursor = conn.cursor()
@@ -138,6 +147,7 @@ async def add_user(ctx, name: str, start_date: str, duration: int, mention: disc
 @bot.command()
 async def remove(ctx, name: str, mention: discord.Member = None):
     try:
+        print(f"{ctx.author.name} requested the remove command.")
         matches = [m for m in ctx.guild.members if m.display_name == name]
 
         # Case 1: No matches
@@ -168,13 +178,14 @@ async def remove(ctx, name: str, mention: discord.Member = None):
         conn = sqlite3.connect("data.db")
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM user WHERE user_id = ?", (member.id,))
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (member.id,))
         if cursor.fetchone():
             # Delete user from database
             cursor.execute("DELETE FROM users WHERE user_id = ?", (member.id,))
             conn.commit()
             conn.close()
 
+            await assign_void(member)
             await ctx.send(f"User '{member.display_name}' has been removed from the family plan.")
         else:
             await ctx.send(f"User '{member.display_name}' has failed to be removed.")
@@ -186,11 +197,12 @@ async def remove(ctx, name: str, mention: discord.Member = None):
 @bot.command()
 async def list(ctx):
     try:
+        print(f"{ctx.author.name} requested the list command.")
         conn = sqlite3.connect("data.db")
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT username, start_date, end_date, duration, paid FROM user")
+            "SELECT username, start_date, end_date, duration, cost, paid FROM users")
         users = cursor.fetchall()
         conn.close()
 
@@ -200,14 +212,15 @@ async def list(ctx):
 
         response = "***Spotify Family Plan Members***\n"
         for user in users:
-            username, start_date, end_date, duration, paid = user
+            username, start_date, end_date, duration, cost, paid = user
             status = "Paid" if paid else "Unpaid"
             response += (
                 f"{username}\n"
-                f"  - Start Date: {start_date}\n"
-                f"  - End Date: {end_date}\n"
-                f"  - Duration: {duration} months\n"
-                f"  - Status: {status}\n"
+                f"      Start Date: {start_date}\n"
+                f"      End Date: {end_date}\n"
+                f"      Duration: {duration} months\n"
+                f"      Cost: ${cost}\n"
+                f"      Status: {status}\n"
             )
         await ctx.send(response)
     except Exception as e:
@@ -216,24 +229,26 @@ async def list(ctx):
 
 @bot.command()
 async def myself(ctx):
-    print(f"{ctx.author.name} requested the myself command.")
+    print(f"{ctx.author.display_name} requested the myself command.")
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT start_date, end_date, duration, paid FROM user WHERE user_id = ?", (ctx.author.id,))
+        "SELECT start_date, end_date, duration, paid FROM users WHERE user_id = ?", (ctx.author.id,))
     user = cursor.fetchone()
     conn.close()
     if user:
         start_date, end_date, duration, paid = user
         status = "Paid" if paid else "Unpaid"
-        response = f"{ctx.author.name} Information"
+        response = f"{ctx.author.name}\n"
         response += (
-            f"  - Start Date: {start_date}\n"
-            f"  - End Date: {end_date}\n"
-            f"  - Duration: {duration} months\n"
-            f"  - Status: {status}\n"
+            f"      Start Date: {start_date}\n"
+            f"      End Date: {end_date}\n"
+            f"      Duration: {duration} months\n"
+            f"      Status: {status}\n"
         )
+
+        await ctx.send(response)
     else:
         await ctx.send("You are not registered in the database.")
         return
@@ -242,6 +257,7 @@ async def myself(ctx):
 @bot.command()
 async def set_cost(ctx, new_cost: float, effective_date: str = None):
     try:
+        print(f"{ctx.author.name} requested the set_cost command.")
         if ctx.author != ctx.guild.owner:
             await ctx.send("Only the server owner can update the cost.")
             return
@@ -329,6 +345,7 @@ async def get_cost(ctx):
     Displays the current monthly cost of the family plan.
     """
     try:
+        print(f"{ctx.author.name} requested the get_cost command.")
         conn = sqlite3.connect("data.db")
         cursor = conn.cursor()
 
@@ -349,6 +366,7 @@ async def get_cost(ctx):
 @ bot.command()
 async def renew(ctx, *args):
     try:
+        print(f"{ctx.author.name} requested the renew command.")
         if len(args) == 1:
             duration = int(args[0])
             user_id = ctx.author.id
@@ -394,7 +412,7 @@ async def renew(ctx, *args):
 
         current_end_date = datetime.strptime(user[0], "%Y-%m-%d")
         new_end_date = current_end_date + \
-            datetime.timedelta(days=30 * duration)
+            timedelta(days=30 * duration)
 
         cursor.execute("""
             UPDATE users
@@ -443,6 +461,30 @@ async def assign_role(member, paid):
     else:
         await member.add_roles(unpaid_role)
         await member.remove_roles(paid_role)
+
+
+async def assign_void(member):
+    guild = member.guild
+
+    paid_role_name = "Paid"
+    unpaid_role_name = "Not Paid"
+
+    paid_role = discord.utils.get(guild.roles, name=paid_role_name)
+    unpaid_role = discord.utils.get(guild.roles, name=unpaid_role_name)
+    void_role = discord.utils.get(guild.roles, name="void")
+
+    if not void_role:
+        void_role = await guild.create_role(
+            name="void",
+            color=discord.Color.dark_gray(),
+            reason="Auto-assigned to users removed from the database."
+        )
+
+    roles_to_remove = [role for role in [paid_role, unpaid_role] if role]
+    if roles_to_remove:
+        await member.remove_roles(*roles_to_remove, reason="User removed from the database.")
+
+    await member.add_roles(void_role, reason="User removed from the database.")
 
 
 @bot.command()
